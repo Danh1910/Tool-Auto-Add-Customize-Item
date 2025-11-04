@@ -1,185 +1,165 @@
-from flask import Flask, jsonify
+# app.py
+from flask import Flask, jsonify, request
 import os
 from datetime import datetime
 from flask_cors import CORS
+import requests  # <— new
+
 
 app = Flask(__name__)
-CORS(app)
+# bật CORS toàn cục + cho phép header Range nếu browser/element cần
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
-# GIẢ ĐỊNH: mày chạy docker như vầy:
-# docker run -it --name ncnas-scanner -p 5003:5000 \
-#   -v "Z:\auto_add_listing:/ncnas/auto_add_listing" \
-#   ncnas-scanner
-#
-# => bên trong container sẽ có: /ncnas/auto_add_listing/...
-BASE_ROOT = "/ncnas/auto_add_listing"
+# ===== CẤU HÌNH THEO ĐƯỜNG DẪN MỚI =====
+BASE_PATH = r"\\NCNAS\web\customize_listing\hoangtt"
+THUMB_DIR_NAME = "thumbnailImage"
+PREVIEW_DIR_NAME = "overlayImage"
 
-THUMB_DIR_NAME = "thumbnail"
+def list_png_recursive(root_dir: str):
+    """
+    Trả về danh sách TƯƠNG ĐỐI của tất cả file .png bên dưới root_dir (đệ quy).
+    Ví dụ:
+      root_dir = .../thumbnailImage/Book
+      -> ['book-(1).png', 'v2/book-(2).png', ...]
+    Nếu dir không tồn tại -> []
+    """
+    results = []
+    if not os.path.isdir(root_dir):
+        return results
 
+    for dirpath, _, filenames in os.walk(root_dir):
+        for f in filenames:
+            if f.lower().endswith(".png"):
+                full = os.path.join(dirpath, f)
+                rel = os.path.relpath(full, root_dir)
+                # chuẩn hóa slash cho client
+                results.append(rel.replace("\\", "/"))
+    # sắp xếp ổn định để client map theo thứ tự
+    results.sort()
+    return results
 
-def list_dir_safe(path):
-    try:
-        return sorted(os.listdir(path))
-    except Exception as e:
-        return [f"<cannot list: {e}>"]
+def build_group_summary(product_name: str, group_name: str):
+    """Tạo object group (label + số lượng option + đường dẫn + danh sách file)."""
+    thumb_dir = os.path.join(BASE_PATH, product_name, THUMB_DIR_NAME, group_name)
+    preview_dir = os.path.join(BASE_PATH, product_name, PREVIEW_DIR_NAME, group_name)
 
+    thumb_list = list_png_recursive(thumb_dir)
+    overlay_list = list_png_recursive(preview_dir)
+
+    # số lượng option lấy theo thumbnail (như logic cũ)
+    num_png = len(thumb_list)
+
+    return {
+        "key": group_name,
+        "label": f"Choose {group_name.capitalize()}",
+        "number_option": num_png,
+        "thumbnail_dir": thumb_dir,
+        "preview_dir": preview_dir,
+        # mới thêm: danh sách file tương đối
+        "thumbnail": thumb_list,
+        "overlay": overlay_list
+    }
 
 @app.route("/products", methods=["GET"])
-def list_base_root():
+def get_product_summary():
     """
-    GET /products
-    → liệt kê bên trong:
-       /ncnas/auto_add_listing/POD4 Xmas Ugly Sweatshirt/thumbnail
-    và nếu có thì đi tiếp vào 'girl book'
+    Gọi:
+      http://127.0.0.1:5003/products?sku=SKU_ABC
+    → trả về danh sách group kèm danh sách file thumbnail/overlay.
     """
-    # 1) kiểm tra đã mount chưa
-    if not os.path.isdir(BASE_ROOT):
+    product_name = request.args.get("sku")
+    if not product_name:
+        return jsonify({"error": "Missing required param: sku"}), 400
+
+    thumbnail_root = os.path.join(BASE_PATH, product_name, THUMB_DIR_NAME)
+
+    if not os.path.isdir(thumbnail_root):
         return jsonify({
-            "error": "BASE_ROOT does not exist inside container",
-            "base_root": BASE_ROOT,
-            "hint": r"Chạy lại: docker run -v ""Z:\auto_add_listing:/ncnas/auto_add_listing"" ...",
-            "parent_dir": os.path.dirname(BASE_ROOT),
-            "list_parent": list_dir_safe(os.path.dirname(BASE_ROOT))
+            "error": f"thumbnail folder not found: {thumbnail_root}"
         }), 404
 
-    # 2) tới folder POD4...
-    pod4_path = os.path.join(BASE_ROOT, "POD4 Xmas Ugly Sweatshirt")
-    if not os.path.isdir(pod4_path):
-        return jsonify({
-            "error": "POD4 Xmas Ugly Sweatshirt does not exist inside container",
-            "expected_path": pod4_path,
-            "hint": "Kiểm tra lại tên folder trong Z:\\auto_add_listing",
-            "auto_add_listing_list": list_dir_safe(BASE_ROOT)
-        }), 404
-
-    # 3) tới thumbnail
-    thumb_path = os.path.join(pod4_path, "thumbnail")
-    if not os.path.isdir(thumb_path):
-        return jsonify({
-            "error": "thumbnail does not exist inside container",
-            "expected_path": thumb_path,
-            "pod4_list": list_dir_safe(pod4_path)
-        }), 404
-
-    # 4) tới girl book (có khoảng trắng)
-    girl_book_path = os.path.join(thumb_path, "girl book")
-    if not os.path.isdir(girl_book_path):
-        return jsonify({
-            "error": "girl book does not exist inside container",
-            "expected_path": girl_book_path,
-            "thumbnail_list": list_dir_safe(thumb_path)
-        }), 404
-
-    # 5) liệt kê bên trong girl book
-    entries = []
-    for name in list_dir_safe(girl_book_path):
-        full_path = os.path.join(girl_book_path, name)
-        entries.append({
-            "name": name,
-            "is_dir": os.path.isdir(full_path),
-            "full_path": full_path
-        })
-
-    return jsonify({
-        "target": girl_book_path,
-        "exists": True,
-        "entries": entries,
-        "meta": {
-            "generated_at": datetime.now().isoformat()
-        }
-    })
-
-
-
-
-
-
-# 2) ENDPOINT CŨ: đọc product cụ thể
-@app.route("/products/<path:relpath>", methods=["GET"])
-def get_product(relpath):
-    """
-    relpath là phần SAU /ncnas/daocta
-    ví dụ user gọi:
-      /products/T10/POD4 Xmas Ugly Sweatshirt/mk/1/girl book
-
-    thì:
-      parts = ["T10", "POD4 Xmas Ugly Sweatshirt", "mk", "1", "girl book"]
-      product_name = "girl book"
-      base_path    = /ncnas/daocta/T10/POD4 Xmas Ugly Sweatshirt/mk/1
-    """
-    parts = relpath.split("/")
-    if len(parts) < 2:
-        return jsonify({
-            "error": "Need at least base_path and product_name",
-            "received": relpath,
-            "example": "GET /products/T10/POD4 Xmas Ugly Sweatshirt/mk/1/girl book"
-        }), 400
-
-    product_name = parts[-1]            # "girl book"
-    subdir = os.path.join(*parts[:-1])  # "T10/.../mk/1"
-    base_path = os.path.join(BASE_ROOT, subdir)
-
-    # 0. check base root
-    if not os.path.isdir(BASE_ROOT):
-        return jsonify({
-            "error": "BASE_ROOT does not exist inside container",
-            "base_root": BASE_ROOT,
-            "hint": "Kiểm tra -v Z:\\daocta:/ncnas/daocta trong docker run",
-            "list_base_root_parent": list_dir_safe(os.path.dirname(BASE_ROOT))
-        }), 404
-
-    # 1. check base_path (tức là .../mk/1)
-    if not os.path.isdir(base_path):
-        return jsonify({
-            "error": "Product base path does not exist",
-            "base_root": BASE_ROOT,
-            "requested_subdir": subdir,
-            "full_base_path": base_path,
-            "list_base_root": list_dir_safe(BASE_ROOT)
-        }), 404
-
-    # 2. check thumbnail root
-    thumb_root = os.path.join(base_path, THUMB_DIR_NAME, product_name)
-    if not os.path.isdir(thumb_root):
-        return jsonify({
-            "error": "product thumbnail folder not found",
-            "expected_product_thumbnail": thumb_root,
-            "note": "Trong thư mục này phải có các group như eye, hair, ...",
-            "list_thumbnail_parent": list_dir_safe(os.path.join(base_path, THUMB_DIR_NAME)),
-            "received_product_name": product_name
-        }), 404
-
-    # 3. liệt kê group trong thumbnail
+    # Lấy danh sách group con trong thumbnailImage
     group_names = [
-        d for d in os.listdir(thumb_root)
-        if os.path.isdir(os.path.join(thumb_root, d))
+        d for d in os.listdir(thumbnail_root)
+        if os.path.isdir(os.path.join(thumbnail_root, d))
     ]
+    group_names.sort()
 
-    groups = [build_group(base_path, product_name, g) for g in group_names]
+    groups_summary = [build_group_summary(product_name, gname) for gname in group_names]
 
     result = {
         "product_name": product_name,
         "product_code": product_name.replace(" ", "-").lower(),
-        "base_root": BASE_ROOT,
-        "base_path": base_path,
-        "groups": groups,
+        "base_path": BASE_PATH,
+        "groups": groups_summary,
         "meta": {
-            "generated_by": "flask-ncnas-scanner",
+            "generated_by": "flask-ncnas-summary",
             "generated_at": datetime.now().isoformat()
-        },
-        "debug": {
-            "relpath": relpath,
-            "parts": parts,
-            "group_names": group_names
         }
     }
 
-    import json
-    print(json.dumps(result, indent=2, ensure_ascii=False), flush=True)
-
     return jsonify(result)
+
+# ---- (NEW) PROXY ẢNH ----
+ALLOWED_PROXY_HOSTS = {"files.bkteam.top"}  # để tránh bị lợi dụng proxy
+
+@app.get("/proxy")
+def proxy_image():
+    """
+    Dùng:  /proxy?u=<public_image_url>
+    Ví dụ: /proxy?u=https%3A%2F%2Ffiles.bkteam.top%2Fcustomize_listing%2F...
+    """
+    u = request.args.get("u", "").strip()
+    if not u:
+        return jsonify({"error": "missing param u"}), 400
+
+    # Chặn host lạ
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(u).hostname or ""
+    except Exception:
+        return jsonify({"error": "invalid url"}), 400
+
+    if host not in ALLOWED_PROXY_HOSTS:
+        return jsonify({"error": f"host not allowed: {host}"}), 400
+
+    # Forward 1 số header hữu ích (Range nếu phía client yêu cầu)
+    headers = {}
+    if "Range" in request.headers:
+        headers["Range"] = request.headers["Range"]
+
+    try:
+        r = requests.get(u, headers=headers, stream=True, timeout=20)
+    except requests.RequestException as e:
+        return jsonify({"error": f"upstream fetch failed: {str(e)}"}), 502
+
+    # Chuẩn bị streaming Response
+    def gen():
+        for chunk in r.iter_content(chunk_size=64 * 1024):
+            if chunk:
+                yield chunk
+
+    # Lấy content-type từ upstream
+    content_type = r.headers.get("Content-Type", "application/octet-stream")
+    status_code = r.status_code  # hỗ trợ 206 Partial Content nếu có Range
+
+    resp = Response(stream_with_context(gen()), status=status_code, mimetype=content_type)
+
+    # Pass-through 1 số header (nếu có)
+    passthrough = [
+        "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag", "Cache-Control"
+    ]
+    for h in passthrough:
+        if h in r.headers:
+            resp.headers[h] = r.headers[h]
+
+    # CORS cho content script
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Range"
+
+    return resp
 
 
 if __name__ == "__main__":
-    # để log ra console cho dễ debug
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True)
