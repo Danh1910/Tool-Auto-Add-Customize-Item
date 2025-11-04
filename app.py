@@ -6,125 +6,174 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# BÊN TRONG CONTAINER: nhớ mount /ncnas vào đúng chỗ
-BASE_PATH = "/NCNAS/daocta/T10/POD4 Xmas Ugly Sweatshirt/mk/1"
+# GIẢ ĐỊNH: mày chạy docker như vầy:
+# docker run -it --name ncnas-scanner -p 5003:5000 \
+#   -v "Z:\auto_add_listing:/ncnas/auto_add_listing" \
+#   ncnas-scanner
+#
+# => bên trong container sẽ có: /ncnas/auto_add_listing/...
+BASE_ROOT = "/ncnas/auto_add_listing"
 
 THUMB_DIR_NAME = "thumbnail"
-PREVIEW_DIR_NAME = "ct"
 
 
 def list_dir_safe(path):
-    """Trả về list file/folder trong path, nếu không đọc được thì trả về []"""
     try:
         return sorted(os.listdir(path))
     except Exception as e:
         return [f"<cannot list: {e}>"]
 
 
-def list_png_recursive(root_dir):
-    results = []
-    if not os.path.isdir(root_dir):
-        return results
+@app.route("/products", methods=["GET"])
+def list_base_root():
+    """
+    GET /products
+    → liệt kê bên trong:
+       /ncnas/auto_add_listing/POD4 Xmas Ugly Sweatshirt/thumbnail
+    và nếu có thì đi tiếp vào 'girl book'
+    """
+    # 1) kiểm tra đã mount chưa
+    if not os.path.isdir(BASE_ROOT):
+        return jsonify({
+            "error": "BASE_ROOT does not exist inside container",
+            "base_root": BASE_ROOT,
+            "hint": r"Chạy lại: docker run -v ""Z:\auto_add_listing:/ncnas/auto_add_listing"" ...",
+            "parent_dir": os.path.dirname(BASE_ROOT),
+            "list_parent": list_dir_safe(os.path.dirname(BASE_ROOT))
+        }), 404
 
-    for dirpath, dirnames, filenames in os.walk(root_dir):
-        rel_dir = os.path.relpath(dirpath, root_dir)
-        for f in filenames:
-            if f.lower().endswith(".png"):
-                if rel_dir == ".":
-                    rel_path = f
-                else:
-                    rel_path = os.path.join(rel_dir, f)
-                results.append(rel_path)
-    return results
+    # 2) tới folder POD4...
+    pod4_path = os.path.join(BASE_ROOT, "POD4 Xmas Ugly Sweatshirt")
+    if not os.path.isdir(pod4_path):
+        return jsonify({
+            "error": "POD4 Xmas Ugly Sweatshirt does not exist inside container",
+            "expected_path": pod4_path,
+            "hint": "Kiểm tra lại tên folder trong Z:\\auto_add_listing",
+            "auto_add_listing_list": list_dir_safe(BASE_ROOT)
+        }), 404
 
+    # 3) tới thumbnail
+    thumb_path = os.path.join(pod4_path, "thumbnail")
+    if not os.path.isdir(thumb_path):
+        return jsonify({
+            "error": "thumbnail does not exist inside container",
+            "expected_path": thumb_path,
+            "pod4_list": list_dir_safe(pod4_path)
+        }), 404
 
-def build_group(product_name, group_name):
-    thumb_dir = os.path.join(BASE_PATH, THUMB_DIR_NAME, product_name, group_name)
-    preview_dir = os.path.join(BASE_PATH, PREVIEW_DIR_NAME, product_name, group_name)
+    # 4) tới girl book (có khoảng trắng)
+    girl_book_path = os.path.join(thumb_path, "girl book")
+    if not os.path.isdir(girl_book_path):
+        return jsonify({
+            "error": "girl book does not exist inside container",
+            "expected_path": girl_book_path,
+            "thumbnail_list": list_dir_safe(thumb_path)
+        }), 404
 
-    thumb_files = list_png_recursive(thumb_dir)
-
-    options = []
-    order = 1
-    for rel_path in sorted(thumb_files):
-        safe_rel = rel_path.replace("\\", "/").replace("/", "_")
-        option_id = f"{group_name}-{safe_rel}"
-
-        options.append({
-            "id": option_id,
-            "order": order,
-            "name": rel_path.replace("\\", "/"),
-            "thumbnail_file": rel_path,
-            "preview_file": rel_path
+    # 5) liệt kê bên trong girl book
+    entries = []
+    for name in list_dir_safe(girl_book_path):
+        full_path = os.path.join(girl_book_path, name)
+        entries.append({
+            "name": name,
+            "is_dir": os.path.isdir(full_path),
+            "full_path": full_path
         })
-        order += 1
 
-    return {
-        "key": group_name,
-        "label": f"Choose {group_name.capitalize()}",
-        "thumbnail_dir": thumb_dir,
-        "preview_dir": preview_dir,
-        "options": options
-    }
+    return jsonify({
+        "target": girl_book_path,
+        "exists": True,
+        "entries": entries,
+        "meta": {
+            "generated_at": datetime.now().isoformat()
+        }
+    })
 
 
-@app.route("/products/<path:product_name>", methods=["GET"])
-def get_product(product_name):
-    # 0. check base path
-    if not os.path.isdir(BASE_PATH):
+
+
+
+
+# 2) ENDPOINT CŨ: đọc product cụ thể
+@app.route("/products/<path:relpath>", methods=["GET"])
+def get_product(relpath):
+    """
+    relpath là phần SAU /ncnas/daocta
+    ví dụ user gọi:
+      /products/T10/POD4 Xmas Ugly Sweatshirt/mk/1/girl book
+
+    thì:
+      parts = ["T10", "POD4 Xmas Ugly Sweatshirt", "mk", "1", "girl book"]
+      product_name = "girl book"
+      base_path    = /ncnas/daocta/T10/POD4 Xmas Ugly Sweatshirt/mk/1
+    """
+    parts = relpath.split("/")
+    if len(parts) < 2:
         return jsonify({
-            "error": "BASE_PATH does not exist in container",
-            "base_path": BASE_PATH,
-            "hint": "Kiểm tra docker -v đã mount đúng chưa",
-            "parent_dir_of_base_path": os.path.dirname(BASE_PATH),
-            "list_parent": list_dir_safe(os.path.dirname(BASE_PATH))
+            "error": "Need at least base_path and product_name",
+            "received": relpath,
+            "example": "GET /products/T10/POD4 Xmas Ugly Sweatshirt/mk/1/girl book"
+        }), 400
+
+    product_name = parts[-1]            # "girl book"
+    subdir = os.path.join(*parts[:-1])  # "T10/.../mk/1"
+    base_path = os.path.join(BASE_ROOT, subdir)
+
+    # 0. check base root
+    if not os.path.isdir(BASE_ROOT):
+        return jsonify({
+            "error": "BASE_ROOT does not exist inside container",
+            "base_root": BASE_ROOT,
+            "hint": "Kiểm tra -v Z:\\daocta:/ncnas/daocta trong docker run",
+            "list_base_root_parent": list_dir_safe(os.path.dirname(BASE_ROOT))
         }), 404
 
-    # 1. check thumbnail root (không có product_name)
-    thumb_root_no_product = os.path.join(BASE_PATH, THUMB_DIR_NAME)
-    if not os.path.isdir(thumb_root_no_product):
+    # 1. check base_path (tức là .../mk/1)
+    if not os.path.isdir(base_path):
         return jsonify({
-            "error": "thumbnail root (without product) not found",
-            "thumbnail_root": thumb_root_no_product,
-            "list_base_path": list_dir_safe(BASE_PATH)
+            "error": "Product base path does not exist",
+            "base_root": BASE_ROOT,
+            "requested_subdir": subdir,
+            "full_base_path": base_path,
+            "list_base_root": list_dir_safe(BASE_ROOT)
         }), 404
 
-    # 2. check thumbnail + product
-    thumbnail_root = os.path.join(thumb_root_no_product, product_name)
-
-    if not os.path.isdir(thumbnail_root):
+    # 2. check thumbnail root
+    thumb_root = os.path.join(base_path, THUMB_DIR_NAME, product_name)
+    if not os.path.isdir(thumb_root):
         return jsonify({
             "error": "product thumbnail folder not found",
-            "expected_product_thumbnail": thumbnail_root,
-            "note": "Thư mục này phải tồn tại và bên trong có các nhóm như 'hair','eye',... ",
-            "list_thumbnail_root": list_dir_safe(thumb_root_no_product),
+            "expected_product_thumbnail": thumb_root,
+            "note": "Trong thư mục này phải có các group như eye, hair, ...",
+            "list_thumbnail_parent": list_dir_safe(os.path.join(base_path, THUMB_DIR_NAME)),
             "received_product_name": product_name
         }), 404
 
-    # 3. liệt kê group
+    # 3. liệt kê group trong thumbnail
     group_names = [
-        d for d in os.listdir(thumbnail_root)
-        if os.path.isdir(os.path.join(thumbnail_root, d))
+        d for d in os.listdir(thumb_root)
+        if os.path.isdir(os.path.join(thumb_root, d))
     ]
 
-    groups = [build_group(product_name, g) for g in group_names]
+    groups = [build_group(base_path, product_name, g) for g in group_names]
 
     result = {
         "product_name": product_name,
         "product_code": product_name.replace(" ", "-").lower(),
-        "base_path": BASE_PATH,
+        "base_root": BASE_ROOT,
+        "base_path": base_path,
         "groups": groups,
         "meta": {
             "generated_by": "flask-ncnas-scanner",
             "generated_at": datetime.now().isoformat()
         },
         "debug": {
-            "thumbnail_root": thumbnail_root,
+            "relpath": relpath,
+            "parts": parts,
             "group_names": group_names
         }
     }
 
-    # in ra container
     import json
     print(json.dumps(result, indent=2, ensure_ascii=False), flush=True)
 
@@ -132,5 +181,5 @@ def get_product(product_name):
 
 
 if __name__ == "__main__":
-    # chạy đúng port 5000 như docker map
-    app.run(host="0.0.0.0", port=5000)
+    # để log ra console cho dễ debug
+    app.run(host="0.0.0.0", port=5000, debug=True)
